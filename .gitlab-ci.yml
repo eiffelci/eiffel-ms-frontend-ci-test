@@ -1,0 +1,679 @@
+image: eiffelericsson/jdk8mvndockergitjqhelm:latest
+
+variables:
+  GIT_SSL_NO_VERIFY: "true"
+  DOCKER_HOST: tcp://localhost:2375
+  DOCKER_DRIVER: overlay2
+  sourceDomain: $CI_PROJECT_URL
+  sourceHost: $HOSTNAME
+  sourceName: $CI_SERVER_NAME
+  sourceUri: $CI_PIPELINE_URL
+  dockerImg: "eiffelericsson/jdk8mvndockergitjq:latest"
+  remremurl: $EIFFEL_REMREM_URL
+  imageregistry: $CI_REGISTRY
+  imagerepository: $CI_PROJECT_PATH
+  arm_path: $EIFFEL_NEXUS_URL
+  arm_user: "admin"
+  arm_psw: "admin123"
+
+services:
+  - docker:dind
+
+stages:
+  - sccevent
+  - compile
+  - unittests-componenttests
+  - publish-artifacts-arm
+  - build-and-push-docker-image-to-registry
+  - deploy
+
+sccevent:
+  stage: sccevent
+  script:
+    - env
+    - mkdir out
+    - "JSON_STRING_SCCEvent=$( jq -n --arg sourceDomain_ \"$sourceDomain\"                                                          \
+                                                --arg sourceHost_ \"$sourceHost\"                                                   \
+                                                --arg sourceName_ \"$sourceName\"                                                   \
+                                                --arg sourceUri_  \"$sourceUri\"                                                    \
+                                                --arg authorname_  \"$GITLAB_USER_NAME\"                                            \
+                                                --arg authoremail_  \"$GITLAB_USER_EMAIL\"                                          \
+                                                --arg author_id_  \"$GITLAB_USER_LOGIN\"                                            \
+                                                --arg changeurl_  \"$CI_PROJECT_URL/commit/$CI_COMMIT_SHA\"                         \
+                                                --arg commitid_  \"$CI_COMMIT_SHA\"                                                 \
+                                                --arg repouri_  \"$CI_PROJECT_URL\"                                                 \
+                                                --arg changebranch_  \"$CI_COMMIT_REF_SLUG\"                                        \
+                                                --arg changeproject_  \"$CI_PROJECT_PATH_SLUG\"                                     \
+                            '{                                                                                                      \
+                              msgParams: {                                                                                          \
+                                            meta: {                                                                                 \
+                                              source: {                                                                             \
+                                                domainId: $sourceDomain_,                                                           \
+                                                host: $sourceHost_,                                                                 \
+                                                name: $sourceName_,                                                                 \
+                                                uri: $sourceUri_                                                                    \
+                                              }                                                                                     \
+                                            }                                                                                       \
+                              },                                                                                                    \
+                            eventParams: {                                                                                          \
+                                          data: {                                                                                   \
+                                              author: {                                                                             \
+                                               name: $authorname_,                                                                  \
+                                               email: $authoremail_,                                                                \
+                                               id: $author_id_                                                                      \
+                                            },                                                                                      \
+                                            change: {                                                                               \
+                                              files: $changeurl_,                                                                   \
+                                              tracker: \"Gitlab\",                                                                  \
+                                              details: $changeurl_                                                                  \
+                                            },                                                                                      \
+                                            gitIdentifier: {                                                                        \
+                                              commitId: $commitid_,                                                                 \
+                                              repoUri:  $repouri_,                                                                  \
+                                              branch:  $changebranch_,                                                              \
+                                              repoName: $changeproject_                                                             \
+                                            },                                                                                      \
+                                            customData: [],                                                                         \
+                                            issues: []                                                                              \
+                                          },                                                                                        \
+                                          links: []                                                                                 \
+                                         }                                                                                          \
+                            }'                                                                                                      \
+                                    ) &&
+                            eventName=EiffelSourceChangeCreatedEvent &&
+                            echo $JSON_STRING_SCCEvent &&
+                            output_curl=$(curl --header 'Content-Type: application/json' -X POST --data \"$(echo $JSON_STRING_SCCEvent)\" $(echo $remremurl$eventName)) &&
+                            echo $output_curl &&
+                            if [ $(echo $output_curl | jq -r .events[0].result) != \"SUCCESS\" ]; then exit 1; fi &&
+                            SCCEventId=$(echo $output_curl | jq -r .events[0].id) &&
+                            echo $SCCEventId &&
+                            echo export SCCEventId=$SCCEventId > out/SCCEventId.env"
+  artifacts:
+    paths:
+      - out/SCCEventId.env
+
+
+compile:
+  stage: compile
+  script:
+    - source out/SCCEventId.env
+    - env
+    - export JAVA_HOME=/usr/lib/jvm/java-1.8-openjdk/jre
+    - echo export POMgroupId=$( mvn -N -f ./pom.xml org.apache.maven.plugins:maven-help-plugin:3.1.0:evaluate -Dexpression=project.groupId -q -DforceStdout )  > out/variables.env
+    - echo export POMartifactId=$( mvn -N -f ./pom.xml org.apache.maven.plugins:maven-help-plugin:3.1.0:evaluate -Dexpression=project.artifactId -q -DforceStdout ) >> out/variables.env
+    - echo export POMversion=$( mvn -N -f ./pom.xml org.apache.maven.plugins:maven-help-plugin:3.1.0:evaluate -Dexpression=project.version -q -DforceStdout ) >> out/variables.env
+    - echo export POMpackaging=$( mvn -N -f ./pom.xml org.apache.maven.plugins:maven-help-plugin:3.1.0:evaluate -Dexpression=project.packaging -q -DforceStdout ) >> out/variables.env
+    - echo export buildCommand="mvn install -DskipTests=true -Dmaven.javadoc.skip=true -B -V"
+    - source out/variables.env
+    - echo export ArtifactName="$POMartifactId-$POMversion.$POMpackaging" >> out/variables.env
+    - source out/variables.env
+    - echo export ARMpath=$artifactorypath/$POMversion/$POMartifactId-$POMversion.$POMpackaging >> out/variables.env
+    - mvn install -DskipTests=true -Dmaven.javadoc.skip=true -B -V
+    - "JSON_STRING_EDEvent=$( jq -n --arg sourceDomain_ \"$sourceDomain\"                                                           \
+                                                --arg sourceHost_ \"$sourceHost\"                                                   \
+                                                --arg sourceName_ \"$sourceName\"                                                   \
+                                                --arg sourceUri_  \"$sourceUri\"                                                    \
+                                                --arg sccEventId_ \"$SCCEventId\"                                                   \
+                                                --arg dockerImage_ \"$dockerImg\"                                                   \
+                            '{                                                                                                      \
+                              msgParams: {                                                                                          \
+                                            meta: {                                                                                 \
+                                              source: {                                                                             \
+                                                domainId: $sourceDomain_,                                                           \
+                                                host: $sourceHost_,                                                                 \
+                                                name: $sourceName_,                                                                 \
+                                                uri: $sourceUri_                                                                    \
+                                              }                                                                                     \
+                                            }                                                                                       \
+                              },                                                                                                    \
+                            eventParams: {                                                                                          \
+                                            data: {                                                                                 \
+                                              name: \"ImageBuildEnvironment\",                                                      \
+                                              image: $dockerImage_                                                                  \
+                                            },                                                                                      \
+                                            links: [                                                                                \
+                                              {                                                                                     \
+                                                type: \"CAUSE\",                                                                    \
+                                                target: $sccEventId_                                                                \
+                                              }                                                                                     \
+                                            ]                                                                                       \
+                                          }                                                                                         \
+                            }'                                                                                                      \
+                                    ) &&
+                            eventName=EiffelEnvironmentDefinedEvent &&
+                            echo $JSON_STRING_EDEvent &&
+                            output_curl=$(curl --header 'Content-Type: application/json' -X POST --data \"$(echo $JSON_STRING_EDEvent)\" $(echo $remremurl$eventName)) &&
+                            echo $output_curl &&
+                            if [ $(echo $output_curl | jq -r .events[0].result) != \"SUCCESS\" ]; then exit 1; fi &&
+                            edCompileEventId=$(echo $output_curl | jq -r .events[0].id) &&
+                            echo $edCompileEventId &&
+
+                            JSON_STRING_CDEvent=$( jq -n --arg sourceDomain_ \"$sourceDomain\"                                      \
+                                                --arg sourceHost_ \"$sourceHost\"                                                   \
+                                                --arg sourceName_ \"$sourceName\"                                                   \
+                                                --arg sourceUri_  \"$sourceUri\"                                                    \
+                                                --arg sccEventId_ \"$SCCEventId\"                                                   \
+                            '{                                                                                                      \
+                              msgParams: {                                                                                          \
+                                            meta: {                                                                                 \
+                                              source: {                                                                             \
+                                                domainId: $sourceDomain_,                                                           \
+                                                host: $sourceHost_,                                                                 \
+                                                name: $sourceName_,                                                                 \
+                                                uri: $sourceUri_                                                                    \
+                                              }                                                                                     \
+                                            }                                                                                       \
+                              },                                                                                                    \
+                            eventParams: {                                                                                          \
+                                            data: {                                                                                 \
+                                              name: \"ImageBuildComposition\"                                                       \
+                                            },                                                                                      \
+                                            links: [                                                                                \
+                                              {                                                                                     \
+                                                type: \"CAUSE\",                                                                    \
+                                                target: $sccEventId_                                                                \
+                                              }                                                                                     \
+                                            ]                                                                                       \
+                                          }                                                                                         \
+                            }'                                                                                                      \
+                                    ) &&
+                            eventName=EiffelCompositionDefinedEvent &&
+                            echo $JSON_STRING_CDEvent &&
+                            output_curl=$(curl --header 'Content-Type: application/json' -X POST --data \"$(echo $JSON_STRING_CDEvent)\" $(echo $remremurl$eventName)) &&
+                            echo $output_curl &&
+                            if [ $(echo $output_curl | jq -r .events[0].result) != \"SUCCESS\" ]; then exit 1; fi &&
+                            cdCompileEventId=$(echo $output_curl | jq -r .events[0].id) &&
+                            echo $cdCompileEventId &&
+
+
+
+                            JSON_STRING_ArtCEvent=$( jq -n --arg sourceDomain_ \"$sourceDomain\"                                    \
+                                                --arg sourceHost_ \"$sourceHost\"                                                   \
+                                                --arg sourceName_ \"$sourceName\"                                                   \
+                                                --arg sourceUri_  \"$sourceUri\"                                                    \
+                                                --arg groupId_ \"$POMgroupId\"                                                      \
+                                                --arg artifactId_ \"$POMartifactId\"                                                \
+                                                --arg version_ \"$POMversion\"                                                      \
+                                                --arg buildCommand_ \"$buildCommand\"                                               \
+                                                --arg artifactName_ \"$POMartifactId\"                                              \
+                                                --arg edCompileEventId_ $edCompileEventId                                           \
+                                                --arg cdCompileEventId_ $cdCompileEventId                                           \
+                            '{                                                                                                      \
+                              msgParams: {                                                                                          \
+                                            meta: {                                                                                 \
+                                              source: {                                                                             \
+                                                domainId: $sourceDomain_,                                                           \
+                                                host: $sourceHost_,                                                                 \
+                                                name: $sourceName_,                                                                 \
+                                                uri: $sourceUri_                                                                    \
+                                              }                                                                                     \
+                                            }                                                                                       \
+                              },                                                                                                    \
+                            eventParams: {                                                                                          \
+                                            data: {                                                                                 \
+                                              gav: {                                                                                \
+                                                  groupId: $groupId_,                                                               \
+                                                  artifactId: $artifactId_,                                                         \
+                                                  version: $version_                                                                \
+                                              },                                                                                    \
+                                              buildCommand: $buildCommand_,                                                         \
+                                              name: $artifactName_,                                                                 \
+                                            },                                                                                      \
+                                            links: [                                                                                \
+                                              {                                                                                     \
+                                                type: \"ENVIRONMENT\",                                                              \
+                                                target: $edCompileEventId_                                                          \
+                                              },                                                                                    \
+                                              {                                                                                     \
+                                                type: \"COMPOSITION\",                                                              \
+                                                target: $cdCompileEventId_                                                          \
+                                              }                                                                                     \
+                                            ]                                                                                       \
+                                          }                                                                                         \
+                            }'                                                                                                      \
+                                    ) &&
+                            eventName=EiffelArtifactCreatedEvent &&
+                            echo $JSON_STRING_ArtCEvent &&
+                            output_curl=$(curl --header 'Content-Type: application/json' -X POST --data \"$(echo $JSON_STRING_ArtCEvent)\" $(echo $remremurl$eventName)) &&
+                            echo $output_curl &&
+                            if [ $(echo $output_curl | jq -r .events[0].result) != \"SUCCESS\" ]; then exit 1; fi &&
+                            ArtCEventId=$(echo $output_curl | jq -r .events[0].id) &&
+                            echo $ArtCEventId &&
+                            echo export ArtCEventId=$ArtCEventId >> out/variables.env"
+  artifacts:
+    paths:
+      - target/$ArtifactName
+      - out/variables.env
+  only:
+    - branches
+
+
+unittests-componenttests:
+  stage: unittests-componenttests
+  script:
+    - source out/SCCEventId.env
+    - echo "Running tests"
+    - cat out/variables.env
+    - source out/variables.env
+    - "ls &&
+
+                            mvn test &&
+
+                            JSON_STRING_EDEvent=$( jq -n --arg sourceDomain_ \"$sourceDomain\"                                      \
+                                                --arg sourceHost_ \"$sourceHost\"                                                   \
+                                                --arg sourceName_ \"$sourceName\"                                                   \
+                                                --arg sourceUri_  \"$sourceUri\"                                                    \
+                                                --arg sccEventId_ \"$SCCEventId\"                                                   \
+                                                --arg dockerImage_ \"$dockerImage\"                                                 \
+                            '{                                                                                                      \
+                              msgParams: {                                                                                          \
+                                            meta: {                                                                                 \
+                                              source: {                                                                             \
+                                                domainId: $sourceDomain_,                                                           \
+                                                host: $sourceHost_,                                                                 \
+                                                name: $sourceName_,                                                                 \
+                                                uri: $sourceUri_                                                                    \
+                                              }                                                                                     \
+                                            }                                                                                       \
+                              },                                                                                                    \
+                            eventParams: {                                                                                          \
+                                            data: {                                                                                 \
+                                              name: \"UnitTestEnvironment\",                                                        \
+                                              image: $dockerImage_                                                                  \
+                                            },                                                                                      \
+                                            links: [                                                                                \
+                                              {                                                                                     \
+                                                type: \"CAUSE\",                                                                    \
+                                                target: $sccEventId_                                                                \
+                                              }                                                                                     \
+                                            ]                                                                                       \
+                                          }                                                                                         \
+                            }'                                                                                                      \
+                                    ) &&
+                            eventName=EiffelEnvironmentDefinedEvent &&
+                            echo $JSON_STRING_EDEvent &&
+                            output_curl=$(curl --header 'Content-Type: application/json' -X POST --data \"$(echo $JSON_STRING_EDEvent)\" $(echo $remremurl$eventName)) &&
+                            echo $output_curl &&
+                            if [ $(echo $output_curl | jq -r .events[0].result) != \"SUCCESS\" ]; then exit 1; fi &&
+                            edUnitEventId=$(echo $output_curl | jq -r .events[0].id) &&
+                            echo $edUnitEventId &&
+
+                            JSON_STRING_CLMEvent=$( jq -n --arg sourceDomain_ \"$sourceDomain\"                                     \
+                                                --arg sourceHost_ \"$sourceHost\"                                                   \
+                                                --arg sourceName_ \"sourceName\"                                                    \
+                                                --arg sourceUri_  \"$sourceUri\"                                                    \
+                                                --arg artEventId_ \"$ArtCEventId\"                                                  \
+                            '{                                                                                                      \
+                              msgParams: {                                                                                          \
+                                            meta: {                                                                                 \
+                                              source: {                                                                             \
+                                                domainId: $sourceDomain_,                                                           \
+                                                host: $sourceHost_,                                                                 \
+                                                name: $sourceName_,                                                                 \
+                                                uri: $sourceUri_                                                                    \
+                                              }                                                                                     \
+                                            }                                                                                       \
+                              },                                                                                                    \
+                            eventParams: {                                                                                          \
+                                            data: {                                                                                 \
+                                              name: \"unitFlow\",                                                                   \
+                                              value: \"SUCCESS\"                                                                    \
+                                            },                                                                                      \
+                                            links: [                                                                                \
+                                              {                                                                                     \
+                                                type: \"SUBJECT\",                                                                  \
+                                                target: $artEventId_                                                                \
+                                              }                                                                                     \
+                                            ]                                                                                       \
+                                          }                                                                                         \
+                            }'                                                                                                      \
+                                    ) &&
+                            eventName=EiffelConfidenceLevelModifiedEvent &&
+                            echo $JSON_STRING_CLMEvent &&
+                            output_curl=$(curl --header 'Content-Type: application/json' -X POST --data \"$(echo $JSON_STRING_CLMEvent)\" $(echo $remremurl$eventName)) &&
+                            echo $output_curl &&
+                            if [ $(echo $output_curl | jq -r .events[0].result) != \"SUCCESS\" ]; then exit 1; fi &&
+                            clmUnitEventId=$(echo $output_curl | jq -r .events[0].id) &&
+                            echo $clmUnitEventId"
+  only:
+    - branches
+
+
+publish-artifacts-arm:
+  stage: publish-artifacts-arm
+  script:
+    - source out/variables.env
+    - "echo publish-artifacts-arm &&
+                          curl -v -u $arm_user:$arm_psw --upload-file target/$ArtifactName $arm_path/$POMgroupId/$POMartifactId/$POMversion/$ArtifactName &&
+                          JSON_STRING_ArtPEvent=$( jq -n --arg sourceDomain_ \"$sourceDomain\"                                      \
+                                                --arg sourceHost_ \"$sourceHost\"                                                   \
+                                                --arg sourceName_ \"$sourceName\"                                                   \
+                                                --arg sourceUri_  \"$sourceUri\"                                                    \
+                                                --arg artEventId_ \"$ArtCEventId\"                                                  \
+                                                --arg armUri_ \"$ARMpath\"                                                          \
+                            '{                                                                                                      \
+                              msgParams: {                                                                                          \
+                                            meta: {                                                                                 \
+                                              source: {                                                                             \
+                                                domainId: $sourceDomain_,                                                           \
+                                                host: $sourceHost_,                                                                 \
+                                                name: $sourceName_,                                                                 \
+                                                uri: $sourceUri_                                                                    \
+                                              }                                                                                     \
+                                            }                                                                                       \
+                              },                                                                                                    \
+                            eventParams: {                                                                                          \
+                                            data: {                                                                                 \
+                                              locations: [                                                                          \
+                                                {                                                                                   \
+                                                  type: \"ARTIFACTORY\",                                                            \
+                                                  uri: $armUri_                                                                     \
+                                                }                                                                                   \
+                                              ]                                                                                     \
+                                            },                                                                                      \
+                                            links: [                                                                                \
+                                              {                                                                                     \
+                                                type: \"ARTIFACT\",                                                                 \
+                                                target: $artEventId_                                                                \
+                                              }                                                                                     \
+                                            ]                                                                                       \
+                                          }                                                                                         \
+                            }'                                                                                                      \
+                                    ) &&
+                            eventName=EiffelArtifactPublishedEvent &&
+                            echo $JSON_STRING_ArtPEvent &&
+                            output_curl=$(curl --header 'Content-Type: application/json' -X POST --data \"$(echo $JSON_STRING_ArtPEvent)\" $(echo $remremurl$eventName)) &&
+                            echo $output_curl &&
+                            if [ $(echo $output_curl | jq -r .events[0].result) != \"SUCCESS\" ]; then exit 1; fi &&
+                            artpARMEventId=$(echo $output_curl | jq -r .events[0].id) &&
+                            echo $artpARMEventId"
+  only:
+    - master
+
+
+build-and-push-docker-image-to-registry:
+  stage: build-and-push-docker-image-to-registry
+  script:
+    - source out/variables.env
+    - "ls &&
+       ls target &&
+                            cp target/$ArtifactName src/main/docker/app.jar &&
+                            GIT_SHORT_COMMIT=$(git log -n 1 --pretty=format:'%h') &&
+                            echo $GIT_SHORT_COMMIT &&
+                            IMAGE_PATH=$imageregistry/$imagerepository/$POMartifactId &&
+                            IMAGE_PATH=$(echo $IMAGE_PATH | tr \"[:upper:]\" \"[:lower:]\") &&
+                            echo $IMAGE_PATH &&
+                            IMAGE_VERSION_TAG=$POMversion-$CI_COMMIT_REF_NAME-$GIT_SHORT_COMMIT &&
+                            IMAGE_VERSION_NAME_TAG=$IMAGE_PATH:$IMAGE_VERSION_TAG &&
+                            docker info &&
+                            docker login $imageregistry -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD &&
+                            buildCommand=\"docker build --no-cache=true -t $IMAGE_VERSION_NAME_TAG -f src/main/docker/Dockerfile src/main/docker\" &&
+                            $(echo $buildCommand) &&
+                            docker push $IMAGE_VERSION_NAME_TAG &&
+                            echo export IMAGE_VERSION_TAG=$IMAGE_VERSION_TAG > out/imagetag.env &&
+                            if [ $CI_COMMIT_REF_NAME = \"master\" ]; then docker tag $IMAGE_VERSION_NAME_TAG $IMAGE_PATH:latest && docker push $IMAGE_PATH:latest && docker rmi $IMAGE_PATH:latest; fi &&
+                            docker rmi $IMAGE_VERSION_NAME_TAG &&
+                            docker logout &&
+
+                            JSON_STRING_EDEvent=$( jq -n --arg sourceDomain_ \"$sourceDomain\"                                      \
+                                                --arg sourceHost_ \"$sourceHost\"                                                   \
+                                                --arg sourceName_ \"$sourceName\"                                                   \
+                                                --arg sourceUri_  \"$sourceUri\"                                                    \
+                                                --arg artEventId_ \"$ArtCEventId\"                                                  \
+                                                --arg dockerImage_ \"$dockerImg\"                                                   \
+                            '{                                                                                                      \
+                              msgParams: {                                                                                          \
+                                            meta: {                                                                                 \
+                                              source: {                                                                             \
+                                                domainId: $sourceDomain_,                                                           \
+                                                host: $sourceHost_,                                                                 \
+                                                name: $sourceName_,                                                                 \
+                                                uri: $sourceUri_                                                                    \
+                                              }                                                                                     \
+                                            }                                                                                       \
+                              },                                                                                                    \
+                            eventParams: {                                                                                          \
+                                            data: {                                                                                 \
+                                              name: \"ImageBuildEnvironment\",                                                      \
+                                              image: $dockerImage_                                                                  \
+                                            },                                                                                      \
+                                            links: [                                                                                \
+                                              {                                                                                     \
+                                                type: \"CAUSE\",                                                                    \
+                                                target: $artEventId_                                                                \
+                                              }                                                                                     \
+                                            ]                                                                                       \
+                                          }                                                                                         \
+                            }'                                                                                                      \
+                                    ) &&
+                            eventName=EiffelEnvironmentDefinedEvent &&
+                            echo $JSON_STRING_EDEvent &&
+                            output_curl=$(curl --header 'Content-Type: application/json' -X POST --data \"$(echo $JSON_STRING_EDEvent)\" $(echo $remremurl$eventName)) &&
+                            echo $output_curl &&
+                            if [ $(echo $output_curl | jq -r .events[0].result) != \"SUCCESS\" ]; then exit 1; fi &&
+                            edImageBuildEventId=$(echo $output_curl | jq -r .events[0].id) &&
+                            echo $edImageBuildEventId &&
+
+                            JSON_STRING_CDEvent=$( jq -n --arg sourceDomain_ \"$sourceDomain\"                                      \
+                                                --arg sourceHost_ \"$sourceHost\"                                                   \
+                                                --arg sourceName_ \"$sourceName\"                                                   \
+                                                --arg sourceUri_  \"$sourceUri\"                                                    \
+                                                --arg artEventId_ \"$ArtCEventId\"                                                  \
+                            '{                                                                                                      \
+                              msgParams: {                                                                                          \
+                                            meta: {                                                                                 \
+                                              source: {                                                                             \
+                                                domainId: $sourceDomain_,                                                           \
+                                                host: $sourceHost_,                                                                 \
+                                                name: $sourceName_,                                                                 \
+                                                uri: $sourceUri_                                                                    \
+                                              }                                                                                     \
+                                            }                                                                                       \
+                              },                                                                                                    \
+                            eventParams: {                                                                                          \
+                                            data: {                                                                                 \
+                                              name: \"ImageBuildComposition\"                                                       \
+                                            },                                                                                      \
+                                            links: [                                                                                \
+                                              {                                                                                     \
+                                                type: \"CAUSE\",                                                                    \
+                                                target: $artEventId_                                                                \
+                                              }                                                                                     \
+                                            ]                                                                                       \
+                                          }                                                                                         \
+                            }'                                                                                                      \
+                                    ) &&
+                            eventName=EiffelCompositionDefinedEvent &&
+                            echo $JSON_STRING_CDEvent &&
+                            output_curl=$(curl --header 'Content-Type: application/json' -X POST --data \"$(echo $JSON_STRING_CDEvent)\" $(echo $remremurl$eventName)) &&
+                            echo $output_curl &&
+                            if [ $(echo $output_curl | jq -r .events[0].result) != \"SUCCESS\" ]; then exit 1; fi &&
+                            cdImageBuildEventId=$(echo $output_curl | jq -r .events[0].id) &&
+                            echo $cdImageBuildEventId &&
+
+                            JSON_STRING_ArtCEvent=$( jq -n --arg sourceDomain_ \"$sourceDomain\"                                    \
+                                                --arg sourceHost_ \"$sourceHost\"                                                   \
+                                                --arg sourceName_ \"$sourceName\"                                                   \
+                                                --arg sourceUri_  \"$sourceUri\"                                                    \
+                                                --arg groupId_ \"$POMgroupId\"                                                      \
+                                                --arg artifactId_ \"$POMartifactId\"                                                \
+                                                --arg version_ \"$POMversion\"                                                      \
+                                                --arg buildCommand_ \"$buildCommand\"                                               \
+                                                --arg artifactName_ \"$POMartifactId\"                                              \
+                                                --arg edImageBuildEventId_ $edImageBuildEventId                                     \
+                                                --arg cdImageBuildEventId_ $cdImageBuildEventId                                     \
+                            '{                                                                                                      \
+                              msgParams: {                                                                                          \
+                                            meta: {                                                                                 \
+                                              source: {                                                                             \
+                                                domainId: $sourceDomain_,                                                           \
+                                                host: $sourceHost_,                                                                 \
+                                                name: $sourceName_,                                                                 \
+                                                uri: $sourceUri_                                                                    \
+                                              }                                                                                     \
+                                            }                                                                                       \
+                              },                                                                                                    \
+                            eventParams: {                                                                                          \
+                                            data: {                                                                                 \
+                                              gav: {                                                                                \
+                                                  groupId: $groupId_,                                                               \
+                                                  artifactId: $artifactId_,                                                         \
+                                                  version: $version_                                                                \
+                                              },                                                                                    \
+                                              buildCommand: $buildCommand_,                                                         \
+                                              name: $artifactName_,                                                                 \
+                                            },                                                                                      \
+                                            links: [                                                                                \
+                                              {                                                                                     \
+                                                type: \"ENVIRONMENT\",                                                              \
+                                                target: $edImageBuildEventId_                                                       \
+                                              },                                                                                    \
+                                              {                                                                                     \
+                                                type: \"COMPOSITION\",                                                              \
+                                                target: $cdImageBuildEventId_                                                       \
+                                              }                                                                                     \
+                                            ]                                                                                       \
+                                          }                                                                                         \
+                            }'                                                                                                      \
+                                    ) &&
+                            eventName=EiffelArtifactCreatedEvent &&
+                            echo $JSON_STRING_ArtCEvent &&
+                            output_curl=$(curl --header 'Content-Type: application/json' -X POST --data \"$(echo $JSON_STRING_ArtCEvent)\" $(echo $remremurl$eventName)) &&
+                            echo $output_curl &&
+                            if [ $(echo $output_curl | jq -r .events[0].result) != \"SUCCESS\" ]; then exit 1; fi &&
+                            ArtCImageBuildEventId=$(echo $output_curl | jq -r .events[0].id) &&
+                            echo $ArtCImageBuildEventId &&
+
+
+
+                            JSON_STRING_ArtPEvent=$( jq -n --arg sourceDomain_ \"$sourceDomain\"                                    \
+                                                --arg sourceHost_ \"$sourceHost\"                                                   \
+                                                --arg sourceName_ \"$sourceName\"                                                   \
+                                                --arg sourceUri_  \"$sourceUri\"                                                    \
+                                                --arg artEventId_ \"$ArtCImageBuildEventId\"                                        \
+                                                --arg imageregUri_ \"$IMAGE_VERSION_NAME_TAG\"                                      \
+                            '{                                                                                                      \
+                              msgParams: {                                                                                          \
+                                            meta: {                                                                                 \
+                                              source: {                                                                             \
+                                                domainId: $sourceDomain_,                                                           \
+                                                host: $sourceHost_,                                                                 \
+                                                name: $sourceName_,                                                                 \
+                                                uri: $sourceUri_                                                                    \
+                                              }                                                                                     \
+                                            }                                                                                       \
+                              },                                                                                                    \
+                            eventParams: {                                                                                          \
+                                            data: {                                                                                 \
+                                              locations: [                                                                          \
+                                                {                                                                                   \
+                                                  type: \"OTHER\",                                                                  \
+                                                  uri: $imageregUri_                                                                \
+                                                }                                                                                   \
+                                              ]                                                                                     \
+                                            },                                                                                      \
+                                            links: [                                                                                \
+                                              {                                                                                     \
+                                                type: \"ARTIFACT\",                                                                 \
+                                                target: $artEventId_                                                                \
+                                              }                                                                                     \
+                                            ]                                                                                       \
+                                          }                                                                                         \
+                            }'                                                                                                      \
+                                    ) &&
+                            eventName=EiffelArtifactPublishedEvent &&
+                            echo $JSON_STRING_ArtPEvent &&
+                            output_curl=$(curl --header 'Content-Type: application/json' -X POST --data \"$(echo $JSON_STRING_ArtPEvent)\" $(echo $remremurl$eventName)) &&
+                            echo $output_curl &&
+                            if [ $(echo $output_curl | jq -r .events[0].result) != \"SUCCESS\" ]; then exit 1; fi &&
+                            artpARMEventId=$(echo $output_curl | jq -r .events[0].id) &&
+                            echo $artpARMEventId &&
+
+                            echo Run Docker Image Tests here &&
+
+                            JSON_STRING_CLMEvent=$( jq -n --arg sourceDomain_ \"$sourceDomain\"                                     \
+                                                --arg sourceHost_ \"$sourceHost\"                                                   \
+                                                --arg sourceName_ \"$sourceName\"                                                   \
+                                                --arg sourceUri_  \"$sourceUri\"                                                    \
+                                                --arg artEventId_ \"$ArtCImageBuildEventId\"                                        \
+                            '{                                                                                                      \
+                              msgParams: {                                                                                          \
+                                            meta: {                                                                                 \
+                                              source: {                                                                             \
+                                                domainId: $sourceDomain_,                                                           \
+                                                host: $sourceHost_,                                                                 \
+                                                name: $sourceName_,                                                                 \
+                                                uri: $sourceUri_                                                                    \
+                                              }                                                                                     \
+                                            }                                                                                       \
+                              },                                                                                                    \
+                            eventParams: {                                                                                          \
+                                            data: {                                                                                 \
+                                              name: \"readyForSystemIntegration\",                                                  \
+                                              value: \"SUCCESS\"                                                                    \
+                                            },                                                                                      \
+                                            links: [                                                                                \
+                                              {                                                                                     \
+                                                type: \"SUBJECT\",                                                                  \
+                                                target: $artEventId_                                                                \
+                                              }                                                                                     \
+                                            ]                                                                                       \
+                                          }                                                                                         \
+                            }'                                                                                                      \
+                                    ) &&
+                            eventName=EiffelConfidenceLevelModifiedEvent &&
+                            echo $JSON_STRING_CLMEvent &&
+                            output_curl=$(curl --header 'Content-Type: application/json' -X POST --data \"$(echo $JSON_STRING_CLMEvent)\" $(echo $remremurl$eventName)) &&
+                            echo $output_curl &&
+                            if [ $(echo $output_curl | jq -r .events[0].result) != \"SUCCESS\" ]; then exit 1; fi &&
+                            clmImageEventId=$(echo $output_curl | jq -r .events[0].id) &&
+                            echo $clmImageEventId"
+  only:
+    - master
+  artifacts:
+    paths:
+      - out/imagetag.env
+
+
+deploy_review:
+  stage: deploy
+  script:
+    - echo "Deploy to staging server"
+    - source out/imagetag.env
+    - mkdir -p manifests/dev
+    - export basedomainname=$(echo $CI_PROJECT_URL | awk -F/ '{print $3}' | awk -F'.' '{gsub("http://|/.*","")} NF>2{$1="";$0=substr($0, 2)}1' OFS='.')
+    - echo $basedomainname
+    - helm template --set ingress.hostName=ms-frontend-dev.$basedomainname,image.registry=$CI_REGISTRY,image.repository=$CI_PROJECT_PATH/ms-frontend,image.tag=$IMAGE_VERSION_TAG --values deployment/ms-frontend/values-dev.yaml --output-dir manifests/dev deployment/ms-frontend
+    - kubectl apply -n $CD_NAMESPACE -f manifests/dev/myapplication/templates
+  only:
+  - merge_requests
+
+
+deploy_staging:
+  stage: deploy
+  script:
+    - echo "Deploy to staging server"
+    - source out/imagetag.env
+    - cat out/imagetag.env
+    - mkdir -p manifests/stage
+    - export basedomainname=$(echo $CI_PROJECT_URL | awk -F/ '{print $3}' | awk -F'.' '{gsub("http://|/.*","")} NF>2{$1="";$0=substr($0, 2)}1' OFS='.')
+    - echo $basedomainname
+    - helm template --set ingress.hostName=ms-frontend-stage.$basedomainname,image.registry=$CI_REGISTRY,image.repository=$CI_PROJECT_PATH/ms-frontend,image.tag=$IMAGE_VERSION_TAG --values deployment/ms-frontend/values-stage.yaml --output-dir manifests/stage deployment/ms-frontend
+    - kubectl apply -n $CD_NAMESPACE -f manifests/stage/myapplication/templates
+  only:
+  - master
+
+
+deploy_prod:
+  stage: deploy
+  script:
+    - echo "Deploy to staging server"
+    - source out/imagetag.env
+    - mkdir -p manifests/prod
+    - export basedomainname=$(echo $CI_PROJECT_URL | awk -F/ '{print $3}' | awk -F'.' '{gsub("http://|/.*","")} NF>2{$1="";$0=substr($0, 2)}1' OFS='.')
+    - echo $basedomainname
+    - helm template --set ingress.hostName=ms-frontend-prod.$basedomainname,image.registry=$CI_REGISTRY,image.repository=$CI_PROJECT_PATH/ms-frontend,image.tag=$IMAGE_VERSION_TAG --values deployment/ms-frontend/values-prod.yaml --output-dir manifests/prod deployment/ms-frontend 
+    - kubectl apply -n $CD_NAMESPACE -f manifests/prod/myapplication/templates
+  when: manual
+  only:
+  - master
