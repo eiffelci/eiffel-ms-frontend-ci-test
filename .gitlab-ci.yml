@@ -209,7 +209,7 @@ compile:
                               },                                                                                                    \
                             eventParams: {                                                                                          \
                                             data: {                                                                                 \
-                                              identity: identity_,                                                                  \
+                                              identity: $identity_,                                                                  \
                                               buildCommand: $buildCommand_,                                                         \
                                               name: $artifactName_,                                                                 \
                                             },                                                                                      \
@@ -507,7 +507,7 @@ build-and-push-docker-image-to-registry:
                               },                                                                                                    \
                             eventParams: {                                                                                          \
                                             data: {                                                                                 \
-                                              identity: identity_,                                                                  \
+                                              identity: $identity_,                                                                  \
                                               buildCommand: $buildCommand_,                                                         \
                                               name: $artifactName_,                                                                 \
                                             },                                                                                      \
