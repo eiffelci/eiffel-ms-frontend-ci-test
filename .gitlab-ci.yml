@@ -186,12 +186,11 @@ compile:
                             echo $cdCompileEventId &&
 
 
-
                             JSON_STRING_ArtCEvent=$( jq -n --arg sourceDomain_ \"$sourceDomain\"                                    \
                                                 --arg sourceHost_ \"$sourceHost\"                                                   \
                                                 --arg sourceName_ \"$sourceName\"                                                   \
                                                 --arg sourceUri_  \"$sourceUri\"                                                    \
-                                                --arg identity_ \"pkg:maven/{{workflow.outputs.parameters.POMgroupId}}/{{workflow.outputs.parameters.POMgroupId}}/{{workflow.outputs.parameters.POMartifactId}}@{{workflow.outputs.parameters.POMversion}}\"  \ 
+                                                --arg identity_ \"pkg:maven/${POMgroupId}/${POMartifactId}@${POMversion}\"          \ 
                                                 --arg buildCommand_ \"$buildCommand\"                                               \
                                                 --arg artifactName_ \"$POMartifactId\"                                              \
                                                 --arg edCompileEventId_ $edCompileEventId                                           \
@@ -209,7 +208,7 @@ compile:
                               },                                                                                                    \
                             eventParams: {                                                                                          \
                                             data: {                                                                                 \
-                                              identity: $identity_,                                                                  \
+                                              identity: $identity_,                                                                 \
                                               buildCommand: $buildCommand_,                                                         \
                                               name: $artifactName_,                                                                 \
                                             },                                                                                      \
@@ -489,7 +488,7 @@ build-and-push-docker-image-to-registry:
                                                 --arg sourceHost_ \"$sourceHost\"                                                   \
                                                 --arg sourceName_ \"$sourceName\"                                                   \
                                                 --arg sourceUri_  \"$sourceUri\"                                                    \
-                                                --arg identity_ \"pkg:docker/$IMAGE_PATH@$IMAGE_VERSION_TAG\"                       \ 
+                                                --arg identity_ \"pkg:docker/${IMAGE_PATH}@${IMAGE_VERSION_TAG}\"                   \ 
                                                 --arg buildCommand_ \"$buildCommand\"                                               \
                                                 --arg artifactName_ \"$POMartifactId\"                                              \
                                                 --arg edImageBuildEventId_ $edImageBuildEventId                                     \
@@ -507,7 +506,7 @@ build-and-push-docker-image-to-registry:
                               },                                                                                                    \
                             eventParams: {                                                                                          \
                                             data: {                                                                                 \
-                                              identity: $identity_,                                                                  \
+                                              identity: $identity_,                                                                 \
                                               buildCommand: $buildCommand_,                                                         \
                                               name: $artifactName_,                                                                 \
                                             },                                                                                      \
