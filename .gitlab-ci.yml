@@ -17,7 +17,7 @@ variables:
   arm_psw: "admin123"
 
 services:
-  - docker:dind
+  - docker:18-dind
 
 stages:
   - sccevent
